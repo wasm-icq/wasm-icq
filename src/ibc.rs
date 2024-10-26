@@ -1,5 +1,5 @@
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{CosmosMsg, Deps, DepsMut, Env, from_json, IbcBasicResponse, IbcChannel, IbcChannelCloseMsg, IbcChannelConnectMsg, IbcChannelOpenMsg, IbcChannelOpenResponse, IbcOrder, IbcPacket, IbcPacketAckMsg, IbcPacketReceiveMsg, IbcPacketTimeoutMsg, IbcReceiveResponse, Never, Reply, Response, StdError, StdResult, SubMsg, SubMsgResult};
+use cosmwasm_std::{Deps, DepsMut, Env, from_json, IbcBasicResponse, IbcChannel, IbcChannelCloseMsg, IbcChannelConnectMsg, IbcChannelOpenMsg, IbcChannelOpenResponse, IbcOrder, IbcPacket, IbcPacketAckMsg, IbcPacketReceiveMsg, IbcPacketTimeoutMsg, IbcReceiveResponse, Never, Reply, Response, StdError, StdResult, SubMsg, SubMsgResult};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use neutron_sdk::bindings::msg::NeutronMsg;
@@ -7,7 +7,8 @@ use neutron_sdk::interchain_queries::v045::{new_register_balances_query_msg};
 
 use crate::ack::make_ack_fail;
 use crate::error::ContractError;
-use crate::state::{CHANNEL_INFO, ChannelInfo, ICQ_CHANNEL_INFO};
+use crate::msg::MsgRegisterInterchainQueryResponse;
+use crate::state::{CHANNEL_INFO, ChannelInfo, ICQ_CHANNEL_INFO, ICQ_QUERY_IBC_CHANNEL, LAST_IBC_CHANNEL_USED};
 
 pub const IBC_VERSION: &str = "icq-1";
 pub const ICQ_UPDATE_PERIOD: u64 = 1_000_000;
@@ -147,6 +148,8 @@ fn do_ibc_packet_receive(
         ICQ_UPDATE_PERIOD,
     )?;
 
+    LAST_IBC_CHANNEL_USED.save(deps.storage, &packet.dest.channel_id)?;
+
     Ok(IbcReceiveResponse::new()
         .add_submessage(SubMsg::reply_on_success(register_balances_query_msg, ICQ_CREATED_RECEIVE_ID))
         .add_attribute("method", "ibc_packet_ack")
@@ -171,11 +174,30 @@ pub struct IbcRegisterBalanceQuery {
 const ICQ_CREATED_RECEIVE_ID: u64 = 1337;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn reply(_deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
+pub fn reply(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
     match reply.id {
         ICQ_CREATED_RECEIVE_ID => match reply.result {
-            SubMsgResult::Ok(_) => {
-                Ok(Response::new().add_attribute("method", "contract_paid"))
+            SubMsgResult::Ok(sub_msg_response) => {
+                // Attempt to deserialize the SubMsgResponse data into MsgRegisterInterchainQueryResponse
+                let response_data = sub_msg_response.data.ok_or_else(|| {
+                    ContractError::Std(StdError::parse_err("SubMsgResult", "Missing response data"))
+                })?;
+
+                // Deserialize the data into MsgRegisterInterchainQueryResponse
+                let register_response: MsgRegisterInterchainQueryResponse = from_json(&response_data)
+                    .map_err(|_| {
+                        ContractError::Std(StdError::parse_err("MsgRegisterInterchainQueryResponse",
+                                                               "Failed to deserialize response data"))
+                    })?;
+
+                let icq_query_id: u64 = register_response.id;
+                let ibc_channel: String = LAST_IBC_CHANNEL_USED.load(deps.storage)?;
+
+                ICQ_QUERY_IBC_CHANNEL.save(deps.storage, icq_query_id, &ibc_channel)?;
+
+                Ok(Response::new()
+                    .add_attribute("method", "query_created")
+                    .add_attribute("query_id", icq_query_id.to_string()))
             },
             SubMsgResult::Err(err) => {
                 Ok(Response::new().set_data(make_ack_fail(err)))

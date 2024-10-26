@@ -1,13 +1,16 @@
-use cosmwasm_std::{Binary, Deps, DepsMut, entry_point, Env, MessageInfo, Response, StdResult, to_json_binary};
+use cosmwasm_std::{Binary, Deps, DepsMut, entry_point, Env, IbcMsg, MessageInfo, Response, StdResult, to_json_binary};
 use cw2::set_contract_version;
 use neutron_sdk::bindings::query::NeutronQuery;
-use neutron_sdk::interchain_queries::v047::queries::query_balance;
+use neutron_sdk::interchain_queries::{check_query_type, get_registered_query, query_kv_result};
+use neutron_sdk::interchain_queries::types::QueryType;
+use neutron_sdk::interchain_queries::v047::queries::{BalanceResponse, query_balance};
+use neutron_sdk::interchain_queries::v047::types::Balances;
 use neutron_sdk::NeutronResult;
 use neutron_sdk::sudo::msg::SudoMsg;
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
-use crate::state::{ICQ_CHANNEL_INFO, KV_CALLBACK_STATS};
+use crate::state::{ICQ_CHANNEL_INFO, ICQ_QUERY_IBC_CHANNEL};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:wasm-icq";
@@ -83,10 +86,42 @@ pub fn sudo_kv_query_result(
             .as_str(),
     );
 
-    // store last KV callback update time
-    KV_CALLBACK_STATS.save(deps.storage, query_id, &env.block.height)?;
+    let balance_response: BalanceResponse = get_balances_result(deps.as_ref(), query_id)?;
+    let ibc_channel_id = ICQ_QUERY_IBC_CHANNEL.load(deps.storage, query_id)?;
 
-    //TODO get query result, delete ICQ and send IBC message to invoker
+    // timeout is in nanoseconds
+    let timeout = env.block.time.plus_seconds(120);
 
-    Ok(Response::default())
+    // TODO review adding message to list of called messages
+    // let remove_msg = NeutronMsg::remove_interchain_query(query_id);
+
+    // prepare ibc message
+    let ibc_msg = IbcMsg::SendPacket {
+        channel_id: ibc_channel_id.clone(),
+        data: to_json_binary(&balance_response)?,
+        timeout: timeout.into(),
+    };
+
+    Ok(Response::new()
+        .add_attribute("method", "send_query_balance_response")
+        .add_attribute("channel", ibc_channel_id)
+        .add_message(ibc_msg))
+}
+
+pub fn get_balances_result(
+    deps: Deps<NeutronQuery>,
+    registered_query_id: u64,
+) -> NeutronResult<BalanceResponse> {
+    let registered_query = get_registered_query(deps, registered_query_id)?;
+
+    check_query_type(registered_query.registered_query.query_type, QueryType::KV)?;
+
+    let balances: Balances = query_kv_result(deps, registered_query_id)?;
+
+    Ok(BalanceResponse {
+        last_submitted_local_height: registered_query
+            .registered_query
+            .last_submitted_result_local_height,
+        balances,
+    })
 }

@@ -31,3 +31,11 @@ pub struct IbcRegisterBalanceQuery {
     pub addr: String,
     pub denom: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+/// Describes response structure for **RegisterInterchainQuery** msg.
+pub struct MsgRegisterInterchainQueryResponse {
+    /// **id** is an identifier of newly registered interchain query.
+    pub id: u64,
+}
