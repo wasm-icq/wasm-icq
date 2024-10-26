@@ -1,11 +1,33 @@
-use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_schema::cw_serde;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[cw_serde]
 pub struct InstantiateMsg {}
 
 #[cw_serde]
-pub enum ExecuteMsg {}
+pub enum ExecuteMsg {
+    RegisterInterchainQueryChannel {
+        chain_id: String,
+        connection_id: String,
+    },
+    UnregisterInterchainQueryChannel {
+        chain_id: String,
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMsg {
+    Balance { query_id: u64 },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct MigrateMsg {}
 
 #[cw_serde]
-#[derive(QueryResponses)]
-pub enum QueryMsg {}
+pub struct IbcRegisterBalanceQuery {
+    pub chain_id: String,
+    pub addr: String,
+    pub denom: String,
+}
