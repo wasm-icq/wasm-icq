@@ -67,7 +67,7 @@ pub fn ibc_packet_receive(
 
     do_ibc_packet_receive(deps, &packet).or_else(|err| {
         Ok(IbcReceiveResponse::new()
-            .add_attribute("action", "receive")
+            .add_attribute("action", "ibc_packet_receive")
             .add_attribute("success", "false")
             .add_attribute("error", err.to_string())
         )
@@ -80,7 +80,7 @@ pub fn ibc_packet_ack(
     _env: Env,
     _msg: IbcPacketAckMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
-    Ok(IbcBasicResponse::new())
+    Ok(IbcBasicResponse::new().add_attribute("method", "ibc_packet_ack"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -152,7 +152,7 @@ fn do_ibc_packet_receive(
 
     Ok(IbcReceiveResponse::new()
         .add_submessage(SubMsg::reply_on_success(register_balances_query_msg, ICQ_CREATED_RECEIVE_ID))
-        .add_attribute("method", "ibc_packet_ack")
+        .add_attribute("method", "ibc_packet_receive")
         .add_attribute("sequence", packet.sequence.to_string())
     )
 }
