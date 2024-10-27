@@ -1,5 +1,6 @@
-use cosmwasm_std::{Binary, Deps, DepsMut, entry_point, Env, IbcMsg, MessageInfo, Response, StdResult, to_json_binary};
+use cosmwasm_std::{Binary, Deps, DepsMut, entry_point, Env, IbcMsg, MessageInfo, Response, StdError, StdResult, to_json_binary};
 use cw2::set_contract_version;
+use neutron_sdk::bindings::msg::NeutronMsg;
 use neutron_sdk::bindings::query::NeutronQuery;
 use neutron_sdk::interchain_queries::{check_query_type, get_registered_query, query_kv_result};
 use neutron_sdk::interchain_queries::types::QueryType;
@@ -7,10 +8,9 @@ use neutron_sdk::interchain_queries::v047::queries::{BalanceResponse, query_bala
 use neutron_sdk::interchain_queries::v047::types::Balances;
 use neutron_sdk::NeutronResult;
 use neutron_sdk::sudo::msg::SudoMsg;
-
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
-use crate::state::{ICQ_CHANNEL_INFO, ICQ_QUERY_IBC_CHANNEL};
+use crate::state::{CHANNEL_INFO, ICQ_CHANNEL_INFO};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:wasm-icq";
@@ -34,16 +34,17 @@ pub fn execute(
     _env: Env,
     _info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response, ContractError> {
+) -> Result<Response<NeutronMsg>, ContractError> {
     match msg {
-        ExecuteMsg::RegisterInterchainQueryChannel { chain_id, connection_id } => {
-            ICQ_CHANNEL_INFO.save(deps.storage, &chain_id, &connection_id)?;
+        ExecuteMsg::RegisterInterchainQueryChannel { connection_id } => {
+            deps.api.debug("WASMDEBUG: RegisterInterchainQueryChannel");
+            ICQ_CHANNEL_INFO.save(deps.storage, &connection_id)?;
             Ok(Response::new())
-        }
-        ExecuteMsg::UnregisterInterchainQueryChannel { chain_id } => {
-            ICQ_CHANNEL_INFO.remove(deps.storage, &chain_id);
-            Ok(Response::new())
-        }
+        },
+        ExecuteMsg::RemoveInterchainQuery { query_id } => {
+            let remove_msg = NeutronMsg::remove_interchain_query(query_id);
+            Ok(Response::new().add_message(remove_msg))
+        },
     }
 }
 
@@ -86,8 +87,9 @@ pub fn sudo_kv_query_result(
             .as_str(),
     );
 
+    let channel_id: String = get_channel_id(deps.as_ref())?;
+
     let balance_response: BalanceResponse = get_balances_result(deps.as_ref(), query_id)?;
-    let ibc_channel_id = ICQ_QUERY_IBC_CHANNEL.load(deps.storage, query_id)?;
 
     // timeout is in nanoseconds
     let timeout = env.block.time.plus_seconds(120);
@@ -97,15 +99,22 @@ pub fn sudo_kv_query_result(
 
     // prepare ibc message
     let ibc_msg = IbcMsg::SendPacket {
-        channel_id: ibc_channel_id.clone(),
+        channel_id: channel_id.to_string(),
         data: to_json_binary(&balance_response)?,
         timeout: timeout.into(),
     };
 
     Ok(Response::new()
         .add_attribute("method", "send_query_balance_response")
-        .add_attribute("channel", ibc_channel_id)
+        .add_attribute("channel", channel_id.to_string())
         .add_message(ibc_msg))
+}
+
+fn get_channel_id(deps: Deps<NeutronQuery>,) -> StdResult<String> {
+    match CHANNEL_INFO.may_load(deps.storage)? {
+        Some(channel_info) => Ok(channel_info.id), // Return the item if it's loaded
+        None => Err(StdError::generic_err("Channel to ICQ module is not setup")),
+    }
 }
 
 pub fn get_balances_result(

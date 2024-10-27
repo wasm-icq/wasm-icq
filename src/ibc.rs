@@ -5,13 +5,12 @@ use cosmwasm_std::entry_point;
 use neutron_sdk::bindings::msg::NeutronMsg;
 use neutron_sdk::interchain_queries::v045::{new_register_balances_query_msg};
 
-use crate::ack::make_ack_fail;
+use crate::ack::{make_ack_fail, make_ack_success};
 use crate::error::ContractError;
-use crate::msg::MsgRegisterInterchainQueryResponse;
-use crate::state::{CHANNEL_INFO, ChannelInfo, ICQ_CHANNEL_INFO, ICQ_QUERY_IBC_CHANNEL, LAST_IBC_CHANNEL_USED};
+use crate::state::{CHANNEL_INFO, ChannelInfo, ICQ_CHANNEL_INFO};
 
 pub const IBC_VERSION: &str = "icq-1";
-pub const ICQ_UPDATE_PERIOD: u64 = 1_000_000;
+pub const ICQ_UPDATE_PERIOD: u64 = 5;
 
 /// Handles the `OpenInit` and `OpenTry` parts of the IBC handshake.
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -30,6 +29,7 @@ pub fn ibc_channel_connect(
     _env: Env,
     msg: IbcChannelConnectMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
+    deps.api.debug("WASMDEBUG: ibc_channel_connect");
     validate_order_and_version(msg.channel(), msg.counterparty_version())?;
 
     let channel: IbcChannel = msg.into();
@@ -38,7 +38,7 @@ pub fn ibc_channel_connect(
         counterparty_endpoint: channel.counterparty_endpoint,
         connection_id: channel.connection_id,
     };
-    CHANNEL_INFO.save(deps.storage, &info.id, &info)?;
+    CHANNEL_INFO.save(deps.storage, &info)?;
 
     Ok(IbcBasicResponse::default())
 }
@@ -49,9 +49,10 @@ pub fn ibc_channel_close(
     _env: Env,
     msg: IbcChannelCloseMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
+    deps.api.debug("WASMDEBUG: ibc_channel_close");
     let channel = msg.channel().endpoint.channel_id.clone();
     // Reset the state for the channel.
-    CHANNEL_INFO.remove(deps.storage, &channel);
+    CHANNEL_INFO.remove(deps.storage);
     Ok(IbcBasicResponse::new()
         .add_attribute("method", "ibc_channel_close")
         .add_attribute("channel", channel))
@@ -63,6 +64,7 @@ pub fn ibc_packet_receive(
     _env: Env,
     msg: IbcPacketReceiveMsg,
 ) -> Result<IbcReceiveResponse<NeutronMsg>, Never> {
+    deps.api.debug("WASMDEBUG: ibc_packet_receive");
     let packet = msg.packet;
 
     do_ibc_packet_receive(deps, &packet).or_else(|err| {
@@ -76,10 +78,11 @@ pub fn ibc_packet_receive(
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn ibc_packet_ack(
-    _deps: DepsMut,
+    deps: DepsMut,
     _env: Env,
     _msg: IbcPacketAckMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
+    deps.api.debug("WASMDEBUG: ibc_packet_ack");
     Ok(IbcBasicResponse::new().add_attribute("method", "ibc_packet_ack"))
 }
 
@@ -138,8 +141,9 @@ fn do_ibc_packet_receive(
     deps: DepsMut,
     packet: &IbcPacket,
 ) -> Result<IbcReceiveResponse<NeutronMsg>, ContractError> {
+    deps.api.debug("WASMDEBUG: do_ibc_packet_receive");
     let query_data: IbcRegisterBalanceQuery = from_json(&packet.data)?;
-    let connection_id: String = get_icq_channel_id(deps.as_ref(), query_data.chain_id)?;
+    let connection_id: String = get_icq_channel_id(deps.as_ref())?;
 
     let register_balances_query_msg = new_register_balances_query_msg(
         connection_id,
@@ -148,17 +152,16 @@ fn do_ibc_packet_receive(
         ICQ_UPDATE_PERIOD,
     )?;
 
-    LAST_IBC_CHANNEL_USED.save(deps.storage, &packet.dest.channel_id)?;
-
     Ok(IbcReceiveResponse::new()
+        .set_ack(make_ack_success())
         .add_submessage(SubMsg::reply_on_success(register_balances_query_msg, ICQ_CREATED_RECEIVE_ID))
         .add_attribute("method", "ibc_packet_receive")
         .add_attribute("sequence", packet.sequence.to_string())
     )
 }
 
-fn get_icq_channel_id(deps: Deps, chain_id: String) -> StdResult<String> {
-    match ICQ_CHANNEL_INFO.may_load(deps.storage, &chain_id)? {
+fn get_icq_channel_id(deps: Deps) -> StdResult<String> {
+    match ICQ_CHANNEL_INFO.may_load(deps.storage)? {
         Some(channel_id) => Ok(channel_id), // Return the item if it's loaded
         None => Err(StdError::generic_err("Channel to ICQ module is not setup")),
     }
@@ -166,7 +169,6 @@ fn get_icq_channel_id(deps: Deps, chain_id: String) -> StdResult<String> {
 
 #[cw_serde]
 pub struct IbcRegisterBalanceQuery {
-    chain_id: String,
     addr: String,
     denom: String,
 }
@@ -177,29 +179,12 @@ const ICQ_CREATED_RECEIVE_ID: u64 = 1337;
 pub fn reply(deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
     match reply.id {
         ICQ_CREATED_RECEIVE_ID => match reply.result {
-            SubMsgResult::Ok(sub_msg_response) => {
-                // Attempt to deserialize the SubMsgResponse data into MsgRegisterInterchainQueryResponse
-                let response_data = sub_msg_response.data.ok_or_else(|| {
-                    ContractError::Std(StdError::parse_err("SubMsgResult", "Missing response data"))
-                })?;
-
-                // Deserialize the data into MsgRegisterInterchainQueryResponse
-                let register_response: MsgRegisterInterchainQueryResponse = from_json(&response_data)
-                    .map_err(|_| {
-                        ContractError::Std(StdError::parse_err("MsgRegisterInterchainQueryResponse",
-                                                               "Failed to deserialize response data"))
-                    })?;
-
-                let icq_query_id: u64 = register_response.id;
-                let ibc_channel: String = LAST_IBC_CHANNEL_USED.load(deps.storage)?;
-
-                ICQ_QUERY_IBC_CHANNEL.save(deps.storage, icq_query_id, &ibc_channel)?;
-
-                Ok(Response::new()
-                    .add_attribute("method", "query_created")
-                    .add_attribute("query_id", icq_query_id.to_string()))
+            SubMsgResult::Ok(_) => {
+                deps.api.debug("WASMDEBUG: reply ICQ_CREATED_RECEIVE_ID Ok");
+                Ok(Response::new().add_attribute("method", "query_created"))
             },
             SubMsgResult::Err(err) => {
+                deps.api.debug("WASMDEBUG: reply ICQ_CREATED_RECEIVE_ID Fail");
                 Ok(Response::new().set_data(make_ack_fail(err)))
             }
         },
